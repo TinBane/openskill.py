@@ -11,6 +11,7 @@ from cpython cimport array
 from libc.math cimport sqrt
 
 import array
+from openskill.batch import _FastRating
 
 
 def cy_rate_game(
@@ -46,10 +47,7 @@ def cy_rate_game(
         for eid in team_ids:
             idx = <int>entity_to_idx[eid]
             s = sig_data[idx]
-            team.append(model.rating(
-                mu=mu_data[idx],
-                sigma=sqrt(s * s + tau_sq),
-            ))
+            team.append(_FastRating(mu_data[idx], sqrt(s * s + tau_sq)))
             indices.append(idx)
         team_objs.append(team)
         team_indices.append(indices)

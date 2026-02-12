@@ -45,7 +45,7 @@ import array
 import math
 from typing import Any
 
-from openskill.batch import Game, partition_waves, MAX_ENTITIES
+from openskill.batch import Game, partition_waves, MAX_ENTITIES, _FastRating
 
 __all__ = ["Ladder", "RatingView"]
 
@@ -311,10 +311,7 @@ class Ladder:
                 idx: int = entity_to_idx[eid]
                 s: float = sigmas[idx]
                 team.append(
-                    model.rating(
-                        mu=mus[idx],
-                        sigma=math.sqrt(s * s + tau_sq),
-                    )
+                    _FastRating(mus[idx], math.sqrt(s * s + tau_sq))
                 )
                 indices.append(idx)
             team_objs.append(team)
