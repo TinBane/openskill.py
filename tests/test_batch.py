@@ -5,7 +5,6 @@ import pytest
 from openskill.batch import (
     BatchProcessor,
     Game,
-    _partition_waves_generator,
     partition_waves,
 )
 from openskill.models import (
@@ -133,38 +132,71 @@ class TestPartitionWaves:
         assert game_wave[1] < game_wave[2]
 
 
-class TestPartitionWavesGenerator:
-    """Tests for the incremental wave generator."""
+class TestPartitionWavesOrdering:
+    """Tests for the chronological ordering invariant."""
 
-    def test_safety_property(self) -> None:
-        """No entity appears twice within a wave (generator version)."""
+    def test_no_leapfrogging(self) -> None:
+        """Game i before game j (shared entities) => wave(i) < wave(j)."""
         games = [
-            Game(teams=[["a", "b"], ["c", "d"]]),
-            Game(teams=[["e", "f"], ["g", "h"]]),
-            Game(teams=[["a", "e"], ["i", "j"]]),
-            Game(teams=[["b", "f"], ["k", "l"]]),
+            Game(teams=[["a", "b"], ["c", "d"]]),  # 0
+            Game(teams=[["a", "c"], ["e", "f"]]),  # 1: shares a,c with 0
+            Game(teams=[["e"], ["g"]]),             # 2: shares e with 1
+            Game(teams=[["b"], ["h"]]),             # 3: shares b with 0
         ]
-        waves = _partition_waves_generator(games)
-        for wave in waves:
-            entities: set[str] = set()
-            for _, game in wave:
-                game_ents: set[str] = set()
-                for team in game.teams:
-                    game_ents.update(team)
-                assert game_ents.isdisjoint(entities)
-                entities.update(game_ents)
+        waves = partition_waves(games)
+        game_wave: dict[int, int] = {}
+        for w_idx, wave in enumerate(waves):
+            for g_idx, _ in wave:
+                game_wave[g_idx] = w_idx
 
-    def test_all_games_present(self) -> None:
-        """All games appear exactly once across generated waves."""
-        games = [
-            Game(teams=[["a"], ["b"]]),
-            Game(teams=[["a"], ["c"]]),
-            Game(teams=[["b"], ["c"]]),
-            Game(teams=[["d"], ["e"]]),
-        ]
-        waves = _partition_waves_generator(games)
-        all_indices = sorted(i for w in waves for i, _ in w)
-        assert all_indices == list(range(len(games)))
+        def get_ents(g: Game) -> set[str]:
+            return {e for t in g.teams for e in t}
+
+        # Check: for all pairs (i < j) sharing entities, wave(i) < wave(j)
+        for i in range(len(games)):
+            for j in range(i + 1, len(games)):
+                if get_ents(games[i]) & get_ents(games[j]):
+                    assert game_wave[i] < game_wave[j], (
+                        f"game {i} (wave {game_wave[i]}) must precede "
+                        f"game {j} (wave {game_wave[j]})"
+                    )
+
+    def test_power_law_no_violations(self) -> None:
+        """Stress test with power-law player distribution (the bug case)."""
+        import math
+        import random
+
+        rng = random.Random(42)
+        pids = [f"p{i}" for i in range(30)]
+        weights = [1.0 / (i + 1) ** 0.6 for i in range(30)]
+        total = sum(weights)
+        weights = [w / total for w in weights]
+
+        games = []
+        for _ in range(100):
+            ts = rng.randint(2, 3)
+            keyed = [(-math.log(rng.random()) / w, p) for w, p in zip(weights, pids)]
+            keyed.sort()
+            chosen = [p for _, p in keyed[: ts * 2]]
+            games.append(Game(teams=[chosen[:ts], chosen[ts:]]))
+
+        waves = partition_waves(games)
+
+        def get_ents(g: Game) -> set[str]:
+            return {e for t in g.teams for e in t}
+
+        game_wave: dict[int, int] = {}
+        for w_idx, wave in enumerate(waves):
+            for g_idx, _ in wave:
+                game_wave[g_idx] = w_idx
+
+        violations = 0
+        for i in range(len(games)):
+            for j in range(i + 1, len(games)):
+                if get_ents(games[i]) & get_ents(games[j]):
+                    if game_wave[i] >= game_wave[j]:
+                        violations += 1
+        assert violations == 0, f"{violations} ordering violations found"
 
 
 class TestBatchProcessor:
