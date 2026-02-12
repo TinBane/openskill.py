@@ -135,7 +135,8 @@ for ModelClass in [PlackettLuce, BradleyTerryFull, BradleyTerryPart,
 
 ## Performance
 
-Benchmarked on CPython 3.11 with 3 000 players.
+Benchmarked on CPython 3.11.14 with 3 000 players.  Both datasets measured in
+the same process run to ensure consistent comparison.
 
 ### Swiss — 13 500 1v1 games, 9 rounds
 
@@ -144,34 +145,36 @@ within a round.  9 large waves of 1 500 games each.
 
 | Approach | PlackettLuce | BradleyTerryFull | BradleyTerryPart | TM Full | TM Part |
 |----------|-------------:|-----------------:|-----------------:|--------:|--------:|
-| `model.rate()` loop | 857 ms | 785 ms | 821 ms | 855 ms | 932 ms |
-| `Ladder` (pure Python) | 153 ms | 139 ms | 136 ms | 190 ms | 192 ms |
-| `Ladder` + Cython | 142 ms | 112 ms | 124 ms | 167 ms | 178 ms |
-| **Speedup** | **6.0x** | **7.0x** | **6.6x** | **5.1x** | **5.2x** |
+| `model.rate()` loop | 840 ms | 840 ms | 802 ms | 899 ms | 947 ms |
+| `Ladder` (pure Python) | 174 ms | 157 ms | 127 ms | 169 ms | 192 ms |
+| `Ladder` + Cython | 153 ms | 111 ms | 105 ms | 160 ms | 175 ms |
+| **Speedup** | **5.5x** | **7.6x** | **7.6x** | **5.6x** | **5.4x** |
 
 ### Power-law — 5 000 mixed-team games, heavy repeat players
 
 Simulates games where a small number of players are far more active than
-others (power-law distribution).  Creates deep dependency chains — 1 167 waves
+others (power-law distribution).  Games use mixed team sizes (2v2, 3v3, etc.)
+so per-game compute is heavier.  Creates deep dependency chains — 1 167 waves
 averaging just 4.3 games each.  This is the worst case for wave parallelism
 but still benefits from the per-game fast path.
 
 | Approach | PlackettLuce | BradleyTerryFull | BradleyTerryPart | TM Full | TM Part |
 |----------|-------------:|-----------------:|-----------------:|--------:|--------:|
-| `model.rate()` loop | 823 ms | 741 ms | 776 ms | 808 ms | 844 ms |
-| `Ladder` (pure Python) | 137 ms | 121 ms | 135 ms | 184 ms | 187 ms |
-| `Ladder` + Cython | 116 ms | 105 ms | 111 ms | 163 ms | 168 ms |
-| **Speedup** | **7.1x** | **7.1x** | **7.0x** | **5.0x** | **5.0x** |
+| `model.rate()` loop | 837 ms | 807 ms | 796 ms | 852 ms | 872 ms |
+| `Ladder` (pure Python) | 140 ms | 164 ms | 129 ms | 171 ms | 176 ms |
+| `Ladder` + Cython | 120 ms | 140 ms | 110 ms | 184 ms | 165 ms |
+| **Speedup** | **7.0x** | **5.8x** | **7.2x** | **5.0x** | **5.3x** |
 
 All approaches produce **bit-identical** results across both datasets
-(within 1e-9).
+(within 1e-9).  Speedups are in the same 5-7x range regardless of game
+structure.
 
 ### Where the time goes
 
 ```
-model.rate()    775 ms  ← deepcopy (31%) + UUID (22%) + validate + compute
-Ladder.rate()   146 ms  ← just compute, no overhead
-Ladder+Cy       134 ms  ← typed array access around compute
+model.rate()    804 ms  ← deepcopy (27%) + UUID (23%) + validate + compute
+Ladder.rate()   165 ms  ← just compute, no overhead
+Ladder+Cy       142 ms  ← typed array access around compute
 ```
 
 The `_compute()` math is the same in all cases — the speedup comes entirely
