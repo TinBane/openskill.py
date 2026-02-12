@@ -135,15 +135,36 @@ for ModelClass in [PlackettLuce, BradleyTerryFull, BradleyTerryPart,
 
 ## Performance
 
-Benchmarked on CPython 3.11, 3 000 players, 13 500 1v1 games (Swiss tournament):
+Benchmarked on CPython 3.11 with 3 000 players.
 
-| Approach | PlackettLuce | BradleyTerryFull |
-|----------|-------------:|-----------------:|
-| `model.rate()` loop | 857 ms | 785 ms |
-| `Ladder` (pure Python) | 153 ms | 139 ms |
-| `Ladder` + Cython | 142 ms | 112 ms |
+### Swiss — 13 500 1v1 games, 9 rounds
 
-All approaches produce **bit-identical** results (within 1e-9).
+Uniform matchmaking: every player plays every round, games are independent
+within a round.  9 large waves of 1 500 games each.
+
+| Approach | PlackettLuce | BradleyTerryFull | BradleyTerryPart | TM Full | TM Part |
+|----------|-------------:|-----------------:|-----------------:|--------:|--------:|
+| `model.rate()` loop | 857 ms | 785 ms | 821 ms | 855 ms | 932 ms |
+| `Ladder` (pure Python) | 153 ms | 139 ms | 136 ms | 190 ms | 192 ms |
+| `Ladder` + Cython | 142 ms | 112 ms | 124 ms | 167 ms | 178 ms |
+| **Speedup** | **6.0x** | **7.0x** | **6.6x** | **5.1x** | **5.2x** |
+
+### Power-law — 5 000 mixed-team games, heavy repeat players
+
+Simulates games where a small number of players are far more active than
+others (power-law distribution).  Creates deep dependency chains — 1 167 waves
+averaging just 4.3 games each.  This is the worst case for wave parallelism
+but still benefits from the per-game fast path.
+
+| Approach | PlackettLuce | BradleyTerryFull | BradleyTerryPart | TM Full | TM Part |
+|----------|-------------:|-----------------:|-----------------:|--------:|--------:|
+| `model.rate()` loop | 823 ms | 741 ms | 776 ms | 808 ms | 844 ms |
+| `Ladder` (pure Python) | 137 ms | 121 ms | 135 ms | 184 ms | 187 ms |
+| `Ladder` + Cython | 116 ms | 105 ms | 111 ms | 163 ms | 168 ms |
+| **Speedup** | **7.1x** | **7.1x** | **7.0x** | **5.0x** | **5.0x** |
+
+All approaches produce **bit-identical** results across both datasets
+(within 1e-9).
 
 ### Where the time goes
 
