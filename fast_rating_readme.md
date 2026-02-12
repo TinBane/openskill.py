@@ -135,7 +135,7 @@ for ModelClass in [PlackettLuce, BradleyTerryFull, BradleyTerryPart,
 
 ## Performance
 
-Benchmarked on 3 000 players, 13 500 1v1 games (Swiss tournament):
+Benchmarked on CPython 3.11, 3 000 players, 13 500 1v1 games (Swiss tournament):
 
 | Approach | PlackettLuce | BradleyTerryFull |
 |----------|-------------:|-----------------:|
