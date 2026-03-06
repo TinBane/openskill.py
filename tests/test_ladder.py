@@ -460,3 +460,44 @@ class TestLadderNoCython:
             assert lad["a"].mu > lad["b"].mu
         finally:
             ladder_mod._HAS_CYTHON = orig
+
+
+class TestLadderAlpha:
+    """Verify draw balance (alpha) flows through Ladder.rate()."""
+
+    def test_ladder_draw_bounded(self) -> None:
+        """Draw via Ladder must produce mu between win and loss outcomes."""
+        mu_a, mu_b = 40.0, 10.0
+
+        results = {}
+        for label, ranks in [("win", [1, 2]), ("loss", [2, 1]), ("draw", [1, 1])]:
+            lad = Ladder(ThurstoneMostellerFull(alpha=0.5))
+            lad.add("a", mu=mu_a)
+            lad.add("b", mu=mu_b)
+            lad.rate([["a"], ["b"]], ranks=ranks)
+            results[label] = lad["a"].mu
+
+        delta_win = results["win"] - mu_a
+        delta_loss = results["loss"] - mu_a
+        delta_draw = results["draw"] - mu_a
+
+        lo = min(delta_win, delta_loss)
+        hi = max(delta_win, delta_loss)
+        assert lo < delta_draw < hi or abs(delta_draw) < 1e-10
+
+    def test_ladder_alpha_propagates(self) -> None:
+        """Different alpha values should produce different ladder results."""
+        mu_a, mu_b = 35.0, 15.0
+
+        lad1 = Ladder(ThurstoneMostellerFull(alpha=0.3))
+        lad1.add("a", mu=mu_a)
+        lad1.add("b", mu=mu_b)
+        lad1.rate([["a"], ["b"]], ranks=[1, 1])
+
+        lad2 = Ladder(ThurstoneMostellerFull(alpha=0.7))
+        lad2.add("a", mu=mu_a)
+        lad2.add("b", mu=mu_b)
+        lad2.rate([["a"], ["b"]], ranks=[1, 1])
+
+        # alpha=0.7 treats draw more like a win for the favoured player
+        assert lad2["a"].mu > lad1["a"].mu

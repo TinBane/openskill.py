@@ -268,6 +268,7 @@ class PlackettLuce:
         margin: float = 0.0,
         limit_sigma: bool = False,
         balance: bool = False,
+        alpha: float = 0.5,
         weight_bounds: tuple[float, float] = (1.0, 2.0),
     ):
         r"""
@@ -316,6 +317,13 @@ class PlackettLuce:
         :param balance: Boolean that determines whether to emphasize
                         rating outliers.
 
+        :param alpha: Draw balance parameter. For Plackett-Luce this is
+                      accepted for API consistency but does not affect
+                      computation, as PL's exp/softmax update mechanism
+                      is naturally bounded. Default 0.5.
+
+                      *Represented by:* :math:`\alpha`
+
         :param weight_bounds: Tuple of (min, max) bounds for normalizing player
                               weights within a team. Weights are scaled to this
                               range. Default is (1.0, 2.0). Set to None to
@@ -343,6 +351,7 @@ class PlackettLuce:
         self.margin: float = float(margin)
         self.limit_sigma: bool = limit_sigma
         self.balance: bool = balance
+        self.alpha: float = float(alpha)
         self.weight_bounds: tuple[float, float] | None = weight_bounds
 
         # Model Data Container
@@ -578,13 +587,19 @@ class PlackettLuce:
                             f"Argument 'weights' must be a list of lists of 'float' values, "
                             f"not '{weight.__class__.__name__}'."
                         )
+                    if not math.isfinite(weight):
+                        raise ValueError("Argument 'weights' values must be finite.")
+                    if self.weight_bounds is None and weight <= 0:
+                        raise ValueError(
+                            "Argument 'weights' values must be > 0 when 'weight_bounds' is None."
+                        )
 
         # Deep Copy Teams
         original_teams = teams
         teams = copy.deepcopy(original_teams)
 
         # Correct Sigma With Tau
-        tau = tau if tau else self.tau
+        tau = self.tau if tau is None else tau
         tau_squared = tau * tau
         for team_index, team in enumerate(teams):
             for player_index, player in enumerate(team):
@@ -603,6 +618,12 @@ class PlackettLuce:
                 _normalize(team_weights, self.weight_bounds[0], self.weight_bounds[1])
                 for team_weights in weights
             ]
+            for team_weights in weights:
+                for weight in team_weights:
+                    if not math.isfinite(weight) or weight <= 0:
+                        raise ValueError(
+                            "Normalized 'weights' values must be finite and > 0."
+                        )
 
         tenet = None
         if ranks:
@@ -777,6 +798,7 @@ class PlackettLuce:
     ) -> list[list[PlackettLuceRating]]:
         # Initialize Constants
         original_teams = teams
+        pre_update_mus = [[player.mu for player in team] for team in teams]
         team_ratings = self._calculate_team_ratings(teams, ranks=ranks)
         c = self._c(team_ratings)
         sum_q = self._sum_q(team_ratings, c, scores)
@@ -901,11 +923,11 @@ class PlackettLuce:
         for rank, indices in rank_groups.items():
             if len(indices) > 1:
                 avg_mu_change = sum(
-                    result[i][0].mu - original_teams[i][0].mu for i in indices
+                    result[i][0].mu - pre_update_mus[i][0] for i in indices
                 ) / len(indices)
                 for i in indices:
                     for j in range(len(result[i])):
-                        result[i][j].mu = original_teams[i][j].mu + avg_mu_change
+                        result[i][j].mu = pre_update_mus[i][j] + avg_mu_change
 
         return result
 

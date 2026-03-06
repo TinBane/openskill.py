@@ -16,9 +16,7 @@ from openskill.models.weng_lin.common import (
     phi_major,
     phi_major_inverse,
     v,
-    vt,
     w,
-    wt,
 )
 
 __all__: list[str] = ["ThurstoneMostellerFull", "ThurstoneMostellerFullRating"]
@@ -277,6 +275,7 @@ class ThurstoneMostellerFull:
         margin: float = 0.0,
         limit_sigma: bool = False,
         balance: bool = False,
+        alpha: float = 0.5,
         weight_bounds: tuple[float, float] = (1.0, 2.0),
     ):
         r"""
@@ -329,6 +328,13 @@ class ThurstoneMostellerFull:
         :param balance: Boolean that determines whether to emphasize
                         rating outliers.
 
+        :param alpha: Draw balance parameter that controls how draw updates
+                      are computed. Uses the geometric mean likelihood where
+                      a draw update is ``alpha * win_update + (1 - alpha) *
+                      loss_update``. Default 0.5 gives symmetric draws.
+
+                      *Represented by:* :math:`\alpha`
+
         :param weight_bounds: Tuple of (min, max) bounds for normalizing player
                               weights within a team. Weights are scaled to this
                               range. Default is (1.0, 2.0). Set to None to
@@ -357,6 +363,7 @@ class ThurstoneMostellerFull:
         self.margin: float = float(margin)
         self.limit_sigma: bool = limit_sigma
         self.balance: bool = balance
+        self.alpha: float = float(alpha)
         self.weight_bounds: tuple[float, float] | None = weight_bounds
 
         # Model Data Container
@@ -598,13 +605,19 @@ class ThurstoneMostellerFull:
                             f"Argument 'weights' must be a list of lists of 'float' values, "
                             f"not '{weight.__class__.__name__}'."
                         )
+                    if not math.isfinite(weight):
+                        raise ValueError("Argument 'weights' values must be finite.")
+                    if self.weight_bounds is None and weight <= 0:
+                        raise ValueError(
+                            "Argument 'weights' values must be > 0 when 'weight_bounds' is None."
+                        )
 
         # Deep Copy Teams
         original_teams = teams
         teams = copy.deepcopy(original_teams)
 
         # Correct Sigma With Tau
-        tau = tau if tau else self.tau
+        tau = self.tau if tau is None else tau
         tau_squared = tau * tau
         for team_index, team in enumerate(teams):
             for player_index, player in enumerate(team):
@@ -623,6 +636,12 @@ class ThurstoneMostellerFull:
                 _normalize(team_weights, self.weight_bounds[0], self.weight_bounds[1])
                 for team_weights in weights
             ]
+            for team_weights in weights:
+                for weight in team_weights:
+                    if not math.isfinite(weight) or weight <= 0:
+                        raise ValueError(
+                            "Normalized 'weights' values must be finite and > 0."
+                        )
 
         tenet = None
         if ranks:
@@ -757,6 +776,7 @@ class ThurstoneMostellerFull:
     ) -> list[list[ThurstoneMostellerFullRating]]:
         # Initialize Constants
         original_teams = teams
+        pre_update_mus = [[player.mu for player in team] for team in teams]
         team_ratings = self._calculate_team_ratings(teams, ranks=ranks)
         beta = self.beta
 
@@ -813,35 +833,39 @@ class ThurstoneMostellerFull:
                         if score_diff > self.margin and self.margin > 0.0:
                             margin_divisor = math.log1p(score_diff / self.margin)
 
+                x_scaled = delta_mu / margin_divisor
+                t_scaled = self.epsilon / c_iq
+
                 if team_q.rank > team_i.rank:
-                    omega += sigma_squared_to_ciq * v(
-                        delta_mu / margin_divisor, self.epsilon / c_iq
-                    )
+                    omega += sigma_squared_to_ciq * v(x_scaled, t_scaled)
                     delta += (
                         gamma_value
                         * sigma_squared_to_ciq
                         / c_iq
-                        * w(delta_mu / margin_divisor, self.epsilon / c_iq)
+                        * w(x_scaled, t_scaled)
                     )
                 elif team_q.rank < team_i.rank:
-                    omega += -sigma_squared_to_ciq * v(
-                        -delta_mu / margin_divisor, self.epsilon / c_iq
-                    )
+                    omega += -sigma_squared_to_ciq * v(-x_scaled, t_scaled)
                     delta += (
                         gamma_value
                         * sigma_squared_to_ciq
                         / c_iq
-                        * w(-delta_mu / margin_divisor, self.epsilon / c_iq)
+                        * w(-x_scaled, t_scaled)
                     )
                 else:
-                    omega += sigma_squared_to_ciq * vt(
-                        delta_mu / margin_divisor, self.epsilon / c_iq
-                    )
+                    # Geometric mean likelihood: draw update is the
+                    # weighted average of win and loss updates.
+                    a = self.alpha
+                    v_win = v(x_scaled, t_scaled)
+                    v_loss = v(-x_scaled, t_scaled)
+                    w_win = w(x_scaled, t_scaled)
+                    w_loss = w(-x_scaled, t_scaled)
+                    omega += sigma_squared_to_ciq * (a * v_win - (1 - a) * v_loss)
                     delta += (
                         gamma_value
                         * sigma_squared_to_ciq
                         / c_iq
-                        * wt(delta_mu / margin_divisor, self.epsilon / c_iq)
+                        * (a * w_win + (1 - a) * w_loss)
                     )
 
             intermediate_result_per_team = []
@@ -880,11 +904,11 @@ class ThurstoneMostellerFull:
         for rank, indices in rank_groups.items():
             if len(indices) > 1:
                 avg_mu_change = sum(
-                    result[i][0].mu - original_teams[i][0].mu for i in indices
+                    result[i][0].mu - pre_update_mus[i][0] for i in indices
                 ) / len(indices)
                 for i in indices:
                     for j in range(len(result[i])):
-                        result[i][j].mu = original_teams[i][j].mu + avg_mu_change
+                        result[i][j].mu = pre_update_mus[i][j] + avg_mu_change
 
         return result
 

@@ -456,11 +456,26 @@ class BatchProcessor:
         wave_q: queue.Queue[list[tuple[int, Game]] | None] = queue.Queue(
             maxsize=self.n_workers * 2
         )
+        stop_event = threading.Event()
+
+        def _put_with_stop(item: list[tuple[int, Game]] | None) -> bool:
+            """Put to a bounded queue while allowing cooperative cancellation."""
+            while not stop_event.is_set():
+                try:
+                    wave_q.put(item, timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
 
         def build_waves_ahead() -> None:
-            for wave in partition_waves(games):
-                wave_q.put(wave)
-            wave_q.put(None)  # sentinel
+            try:
+                for wave in partition_waves(games):
+                    if not _put_with_stop(wave):
+                        return
+            finally:
+                # Best effort sentinel so consumers can exit cleanly.
+                _put_with_stop(None)
 
         builder = threading.Thread(target=build_waves_ahead, daemon=True)
         builder.start()
@@ -490,6 +505,7 @@ class BatchProcessor:
                             wave, entity_to_idx, mus, sigmas, proc_executor
                         )
         finally:
+            stop_event.set()
             builder.join()
 
     def _process_waves(

@@ -2,12 +2,20 @@
 All tests common for Weng-Lin models are located here.
 """
 
+import math
 import random
 from typing import Any
 
 import pytest
 
 from openskill.models import MODELS
+from openskill.models.weng_lin import (
+    BradleyTerryFull,
+    BradleyTerryPart,
+    PlackettLuce,
+    ThurstoneMostellerFull,
+    ThurstoneMostellerPart,
+)
 from openskill.models.weng_lin.common import _ladder_pairs, _unwind, v, vt, w, wt
 
 
@@ -248,6 +256,303 @@ def test_ties_with_close_ratings(model) -> None:
 
     new_teams = model_instance.rate([[player_1], [player_2]], ranks=[0, 0])
 
-    # ratings should converge on ties.
-    assert new_teams[0][0].mu < 30
-    assert new_teams[1][0].mu > 20
+    if model in (PlackettLuce, BradleyTerryFull, ThurstoneMostellerFull):
+        # Full-pairing models apply tie-group mu averaging.
+        assert new_teams[0][0].mu == pytest.approx(30)
+        assert new_teams[1][0].mu == pytest.approx(20)
+    else:
+        # Partial-pairing models still converge on ties.
+        assert new_teams[0][0].mu < 30
+        assert new_teams[1][0].mu > 20
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_rate_tau_override_honors_zero(model) -> None:
+    """A per-call tau of 0.0 should bypass model-level tau inflation."""
+    configured_tau = 1.25
+    model_with_override = model(tau=configured_tau)
+    override_sigmas_seen: list[float] = []
+
+    def capture_override_compute(
+        *,
+        teams,
+        ranks=None,
+        scores=None,
+        weights=None,
+    ):
+        override_sigmas_seen.extend([player.sigma for team in teams for player in team])
+        return [list(team) for team in teams]
+
+    model_with_override._compute = capture_override_compute  # type: ignore[method-assign]
+    p1_override = model_with_override.rating(mu=30.0, sigma=7.0)
+    p2_override = model_with_override.rating(mu=20.0, sigma=9.0)
+    model_with_override.rate([[p1_override], [p2_override]], ranks=[1, 2], tau=0.0)
+    assert override_sigmas_seen == pytest.approx([7.0, 9.0])
+
+    # Without an override, model-level tau should still be applied.
+    model_default = model(tau=configured_tau)
+    default_sigmas_seen: list[float] = []
+
+    def capture_default_compute(
+        *,
+        teams,
+        ranks=None,
+        scores=None,
+        weights=None,
+    ):
+        default_sigmas_seen.extend([player.sigma for team in teams for player in team])
+        return [list(team) for team in teams]
+
+    model_default._compute = capture_default_compute  # type: ignore[method-assign]
+    p1_default = model_default.rating(mu=30.0, sigma=7.0)
+    p2_default = model_default.rating(mu=20.0, sigma=9.0)
+    model_default.rate([[p1_default], [p2_default]], ranks=[1, 2])
+    assert default_sigmas_seen == pytest.approx(
+        [
+            math.sqrt(7.0 * 7.0 + configured_tau * configured_tau),
+            math.sqrt(9.0 * 9.0 + configured_tau * configured_tau),
+        ]
+    )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("bad_weight", [0.0, -1.0])
+def test_rate_rejects_non_positive_weights(model, bad_weight) -> None:
+    """Per-player weights must be strictly positive to keep updates stable."""
+    model_instance = model(weight_bounds=None)
+    a = model_instance.rating()
+    b = model_instance.rating()
+
+    with pytest.raises(ValueError, match=r"weights.*> 0"):
+        model_instance.rate(
+            [[a], [b]],
+            ranks=[1, 2],
+            weights=[[1.0], [bad_weight]],
+        )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [PlackettLuce, BradleyTerryFull, ThurstoneMostellerFull],
+)
+def test_tie_rank_groups_apply_shared_mu_change(model) -> None:
+    """Tied teams should receive the same tie-adjusted mu change."""
+    model_instance = model()
+    teams = [
+        [
+            model_instance.rating(mu=35.0, sigma=7.0),
+            model_instance.rating(mu=25.0, sigma=8.0),
+        ],
+        [
+            model_instance.rating(mu=20.0, sigma=6.0),
+            model_instance.rating(mu=30.0, sigma=5.0),
+        ],
+        [model_instance.rating(mu=28.0, sigma=7.0)],
+    ]
+    before = [[player.mu for player in team] for team in teams]
+
+    new_teams = model_instance.rate(teams, ranks=[1, 1, 3])
+    delta_team_0 = [new_teams[0][i].mu - before[0][i] for i in range(len(new_teams[0]))]
+    delta_team_1 = [new_teams[1][i].mu - before[1][i] for i in range(len(new_teams[1]))]
+
+    for d0, d1 in zip(delta_team_0, delta_team_1):
+        assert d0 == pytest.approx(d1)
+
+
+# ---------------------------------------------------------------------------
+# Geometric mean likelihood draw tests
+# ---------------------------------------------------------------------------
+
+# Models where we can compare draw vs win vs loss updates directly.
+# PlackettLuce uses a different mechanism (exp/softmax, naturally bounded).
+_PAIRWISE_MODELS = [
+    BradleyTerryFull,
+    BradleyTerryPart,
+    ThurstoneMostellerFull,
+    ThurstoneMostellerPart,
+]
+
+
+@pytest.mark.parametrize("model", _PAIRWISE_MODELS)
+@pytest.mark.parametrize(
+    "mu_a, mu_b",
+    [
+        (25.0, 25.0),  # equal skill
+        (30.0, 20.0),  # moderate gap
+        (40.0, 10.0),  # large gap
+        (50.0, 5.0),  # extreme gap
+    ],
+)
+def test_draw_mu_bounded_between_win_and_loss(model, mu_a: float, mu_b: float) -> None:
+    """Draw mu change must be strictly between win and loss mu changes.
+
+    This is the core property of the geometric mean likelihood: a draw is
+    always an intermediate outcome, never more extreme than a decisive result.
+    """
+    m = model()
+    sigma = m.sigma
+
+    # Win for A
+    a_win = m.rating(mu=mu_a, sigma=sigma)
+    b_win = m.rating(mu=mu_b, sigma=sigma)
+    win_result = m.rate([[a_win], [b_win]], ranks=[1, 2])
+    mu_after_win = win_result[0][0].mu
+
+    # Loss for A
+    a_loss = m.rating(mu=mu_a, sigma=sigma)
+    b_loss = m.rating(mu=mu_b, sigma=sigma)
+    loss_result = m.rate([[a_loss], [b_loss]], ranks=[2, 1])
+    mu_after_loss = loss_result[0][0].mu
+
+    # Draw
+    a_draw = m.rating(mu=mu_a, sigma=sigma)
+    b_draw = m.rating(mu=mu_b, sigma=sigma)
+    draw_result = m.rate([[a_draw], [b_draw]], ranks=[1, 1])
+    mu_after_draw = draw_result[0][0].mu
+
+    delta_win = mu_after_win - mu_a
+    delta_loss = mu_after_loss - mu_a
+    delta_draw = mu_after_draw - mu_a
+
+    lo = min(delta_win, delta_loss)
+    hi = max(delta_win, delta_loss)
+
+    assert lo < delta_draw < hi or delta_draw == pytest.approx(0.0, abs=1e-10), (
+        f"Draw delta {delta_draw:.6f} not between win {delta_win:.6f} "
+        f"and loss {delta_loss:.6f} for {model.__name__}"
+    )
+
+
+@pytest.mark.parametrize("model", _PAIRWISE_MODELS)
+def test_draw_sigma_bounded_between_win_and_loss(model) -> None:
+    """Draw sigma reduction should not exceed that of a decisive outcome."""
+    m = model()
+    sigma = m.sigma
+    mu_a, mu_b = 40.0, 10.0  # large gap to stress the old pathology
+
+    results = {}
+    for label, ranks in [("win", [1, 2]), ("loss", [2, 1]), ("draw", [1, 1])]:
+        a = m.rating(mu=mu_a, sigma=sigma)
+        b = m.rating(mu=mu_b, sigma=sigma)
+        res = m.rate([[a], [b]], ranks=ranks)
+        results[label] = res[0][0].sigma
+
+    # Sigma after draw should be >= the minimum of win and loss sigmas
+    # (i.e., draw should not reduce uncertainty more than a decisive outcome).
+    min_decisive_sigma = min(results["win"], results["loss"])
+    assert results["draw"] >= min_decisive_sigma - 1e-10, (
+        f"Draw sigma {results['draw']:.6f} < min decisive sigma "
+        f"{min_decisive_sigma:.6f} for {model.__name__}"
+    )
+
+
+@pytest.mark.parametrize("model", _PAIRWISE_MODELS)
+def test_draw_equal_players_no_mu_change(model) -> None:
+    """A draw between equal players should produce no mu change."""
+    m = model()
+    mu = 25.0
+    a = m.rating(mu=mu, sigma=m.sigma)
+    b = m.rating(mu=mu, sigma=m.sigma)
+    result = m.rate([[a], [b]], ranks=[1, 1])
+    assert result[0][0].mu == pytest.approx(mu, abs=1e-10)
+    assert result[1][0].mu == pytest.approx(mu, abs=1e-10)
+
+
+@pytest.mark.parametrize("model", _PAIRWISE_MODELS)
+def test_draw_equal_players_sigma_decreases(model) -> None:
+    """A draw between equal players should still reduce sigma (we observed a game)."""
+    m = model()
+    sigma = m.sigma
+    a = m.rating(mu=25.0, sigma=sigma)
+    b = m.rating(mu=25.0, sigma=sigma)
+    result = m.rate([[a], [b]], ranks=[1, 1])
+    assert result[0][0].sigma < sigma
+    assert result[1][0].sigma < sigma
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_alpha_parameter_accepted(model) -> None:
+    """All models should accept the alpha parameter."""
+    m = model(alpha=0.5)
+    assert m.alpha == 0.5
+    m2 = model(alpha=0.7)
+    assert m2.alpha == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("model", _PAIRWISE_MODELS)
+def test_alpha_default_symmetric(model) -> None:
+    """With default alpha=0.5, draw updates should be symmetric.
+
+    If A draws B, the mu changes should be equal and opposite.
+    """
+    m = model()
+    a = m.rating(mu=30.0, sigma=m.sigma)
+    b = m.rating(mu=20.0, sigma=m.sigma)
+    result = m.rate([[a], [b]], ranks=[1, 1])
+    delta_a = result[0][0].mu - 30.0
+    delta_b = result[1][0].mu - 20.0
+    assert delta_a == pytest.approx(-delta_b, abs=1e-8)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        BradleyTerryFull,
+        BradleyTerryPart,
+        ThurstoneMostellerFull,
+        ThurstoneMostellerPart,
+    ],
+)
+def test_alpha_affects_draw_direction(model) -> None:
+    """Non-default alpha should shift draw updates toward win or loss."""
+    mu_a, mu_b = 30.0, 20.0
+
+    # alpha > 0.5: draw treated more like a win for favoured player
+    m_high = model(alpha=0.8)
+    a = m_high.rating(mu=mu_a, sigma=m_high.sigma)
+    b = m_high.rating(mu=mu_b, sigma=m_high.sigma)
+    result_high = m_high.rate([[a], [b]], ranks=[1, 1])
+    delta_high = result_high[0][0].mu - mu_a
+
+    # alpha < 0.5: draw treated more like a loss for favoured player
+    m_low = model(alpha=0.2)
+    a = m_low.rating(mu=mu_a, sigma=m_low.sigma)
+    b = m_low.rating(mu=mu_b, sigma=m_low.sigma)
+    result_low = m_low.rate([[a], [b]], ranks=[1, 1])
+    delta_low = result_low[0][0].mu - mu_a
+
+    # Higher alpha should give a more positive (or less negative) mu change
+    assert delta_high > delta_low, (
+        f"alpha=0.8 delta {delta_high:.6f} should exceed "
+        f"alpha=0.2 delta {delta_low:.6f} for {model.__name__}"
+    )
+
+
+@pytest.mark.parametrize("model", _PAIRWISE_MODELS)
+@pytest.mark.parametrize("mu_a", [35.0, 45.0, 60.0])
+def test_draw_never_worse_than_loss_for_favourite(model, mu_a: float) -> None:
+    """Regression test: a draw must never penalise the favourite more than a loss.
+
+    This was the core pathology of the old interval-based draw model (vt/wt)
+    in Thurstone-Mosteller, where large skill gaps caused the draw update to
+    exceed the loss update in magnitude.
+    """
+    mu_b = 10.0
+    m = model()
+
+    # Loss for A (A ranked 2nd)
+    a_loss = m.rating(mu=mu_a, sigma=m.sigma)
+    b_loss = m.rating(mu=mu_b, sigma=m.sigma)
+    loss_result = m.rate([[a_loss], [b_loss]], ranks=[2, 1])
+    loss_penalty = mu_a - loss_result[0][0].mu  # positive = mu went down
+
+    # Draw
+    a_draw = m.rating(mu=mu_a, sigma=m.sigma)
+    b_draw = m.rating(mu=mu_b, sigma=m.sigma)
+    draw_result = m.rate([[a_draw], [b_draw]], ranks=[1, 1])
+    draw_penalty = mu_a - draw_result[0][0].mu  # positive = mu went down
+
+    assert draw_penalty <= loss_penalty + 1e-10, (
+        f"Draw penalty {draw_penalty:.6f} exceeds loss penalty "
+        f"{loss_penalty:.6f} for {model.__name__} at mu_a={mu_a}"
+    )

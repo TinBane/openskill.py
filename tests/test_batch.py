@@ -1,5 +1,7 @@
 """Tests for batch processing module."""
 
+import threading
+
 import pytest
 
 from openskill.batch import (
@@ -285,6 +287,35 @@ class TestBatchProcessor:
         for eid in seq_ratings:
             assert abs(seq_ratings[eid][0] - pip_ratings[eid][0]) < 1e-10
             assert abs(seq_ratings[eid][1] - pip_ratings[eid][1]) < 1e-10
+
+    def test_pipelined_exception_does_not_deadlock(self) -> None:
+        """Pipelined processing should propagate exceptions without hanging."""
+        model = PlackettLuce()
+        processor = BatchProcessor(model, n_workers=2, pipeline=True)
+        processor._use_threads = (
+            True  # exercise the bounded queue path without processes
+        )
+
+        # Invalid weight shape triggers an IndexError in per-game computation.
+        games = [
+            Game(teams=[["a"], ["b"]], ranks=[1, 2], weights=[[], [1.0]])
+            for _ in range(100)
+        ]
+        caught: list[Exception] = []
+
+        def run() -> None:
+            try:
+                processor.process(games)
+            except Exception as exc:
+                caught.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=2.0)
+
+        assert not thread.is_alive(), "pipeline processing deadlocked after exception"
+        assert caught
+        assert isinstance(caught[0], IndexError)
 
     def test_initial_ratings_respected(self) -> None:
         """Pre-existing ratings should be used instead of defaults."""
@@ -787,3 +818,54 @@ class TestPartitionWavesEdgeCases:
         assert wave_indices[0] == 0
         assert wave_indices[1] == 1
         assert wave_indices[2] == 2
+
+
+class TestAlphaThroughBatch:
+    """Verify draw balance (alpha) flows through batch processing."""
+
+    def test_batch_draw_bounded_tm_full(self) -> None:
+        """TM Full draws via BatchProcessor must be bounded between win and loss."""
+        model = ThurstoneMostellerFull(alpha=0.5)
+        mu_a, mu_b = 40.0, 10.0
+        initial = {"a": (mu_a, model.sigma), "b": (mu_b, model.sigma)}
+
+        win_proc = BatchProcessor(model, n_workers=1)
+        loss_proc = BatchProcessor(model, n_workers=1)
+        draw_proc = BatchProcessor(model, n_workers=1)
+
+        win_r = win_proc.process(
+            [Game(teams=[["a"], ["b"]], ranks=[1, 2])], initial_ratings=dict(initial)
+        )
+        loss_r = loss_proc.process(
+            [Game(teams=[["a"], ["b"]], ranks=[2, 1])], initial_ratings=dict(initial)
+        )
+        draw_r = draw_proc.process(
+            [Game(teams=[["a"], ["b"]], ranks=[1, 1])], initial_ratings=dict(initial)
+        )
+
+        delta_win = win_r["a"][0] - mu_a
+        delta_loss = loss_r["a"][0] - mu_a
+        delta_draw = draw_r["a"][0] - mu_a
+
+        lo = min(delta_win, delta_loss)
+        hi = max(delta_win, delta_loss)
+        assert lo < delta_draw < hi or abs(delta_draw) < 1e-10
+
+    def test_batch_alpha_propagates(self) -> None:
+        """Different alpha values should produce different draw results."""
+        mu_a, mu_b = 35.0, 15.0
+
+        games = [Game(teams=[["a"], ["b"]], ranks=[1, 1])]
+
+        m1 = ThurstoneMostellerFull(alpha=0.3)
+        r1 = BatchProcessor(m1, n_workers=1).process(
+            games, initial_ratings={"a": (mu_a, m1.sigma), "b": (mu_b, m1.sigma)}
+        )
+
+        m2 = ThurstoneMostellerFull(alpha=0.7)
+        r2 = BatchProcessor(m2, n_workers=1).process(
+            games, initial_ratings={"a": (mu_a, m2.sigma), "b": (mu_b, m2.sigma)}
+        )
+
+        # alpha=0.7 treats draw more like a win for the favoured player
+        assert r2["a"][0] > r1["a"][0]
