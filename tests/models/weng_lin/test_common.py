@@ -239,8 +239,21 @@ def test_ties(model, tie_score, num_teams, team_size, tie_type) -> None:
     ), f"Model {model.__name__} with score {tie_score}: All players should end with lower or equal sigma"
 
 
-@pytest.mark.parametrize("model", MODELS)
-def test_ties_with_close_ratings(model) -> None:
+MODELS_WITH_TIE_ADJUSTMENT = [
+    m for m in MODELS if m.__name__ in ("PlackettLuce", "BradleyTerryFull", "ThurstoneMostellerFull")
+]
+MODELS_WITHOUT_TIE_ADJUSTMENT = [
+    m for m in MODELS if m not in MODELS_WITH_TIE_ADJUSTMENT
+]
+
+
+@pytest.mark.parametrize("model", MODELS_WITH_TIE_ADJUSTMENT)
+def test_ties_two_teams_equal_mu_change(model) -> None:
+    """
+    In a 2-team tie with tie-adjustment, the averaged mu changes are
+    equal for both teams. In the 2-team case the average is zero
+    (symmetric-but-opposite changes cancel out).
+    """
     model_instance = model()
 
     player_1 = model_instance.rating(mu=30)
@@ -248,6 +261,70 @@ def test_ties_with_close_ratings(model) -> None:
 
     new_teams = model_instance.rate([[player_1], [player_2]], ranks=[0, 0])
 
-    # ratings should converge on ties.
+    mu_change_1 = new_teams[0][0].mu - 30
+    mu_change_2 = new_teams[1][0].mu - 20
+    assert mu_change_1 == pytest.approx(mu_change_2, abs=1e-10)
+
+
+@pytest.mark.parametrize("model", MODELS_WITHOUT_TIE_ADJUSTMENT)
+def test_ties_two_teams_convergence(model) -> None:
+    """
+    Partial-pairing models have no tie-adjustment, so a 2-team tie
+    naturally converges the ratings toward each other.
+    """
+    model_instance = model()
+
+    player_1 = model_instance.rating(mu=30)
+    player_2 = model_instance.rating(mu=20)
+
+    new_teams = model_instance.rate([[player_1], [player_2]], ranks=[0, 0])
+
     assert new_teams[0][0].mu < 30
     assert new_teams[1][0].mu > 20
+
+
+@pytest.mark.parametrize("model", MODELS_WITH_TIE_ADJUSTMENT)
+def test_ties_three_teams_equal_change(model) -> None:
+    """
+    In a 3-team game where two teams tie at rank 1 and one loses at
+    rank 2, the tied teams should receive the same mu change.
+    """
+    model_instance = model()
+
+    strong = model_instance.rating(mu=35)
+    weak = model_instance.rating(mu=15)
+    loser = model_instance.rating(mu=25)
+
+    new_teams = model_instance.rate(
+        [[strong], [weak], [loser]], ranks=[1, 1, 2]
+    )
+
+    change_strong = new_teams[0][0].mu - 35
+    change_weak = new_teams[1][0].mu - 15
+    assert change_strong == pytest.approx(change_weak, abs=1e-10)
+
+    assert new_teams[2][0].mu < 25
+
+
+@pytest.mark.parametrize("model", MODELS_WITHOUT_TIE_ADJUSTMENT)
+def test_ties_three_teams_no_adjustment(model) -> None:
+    """
+    Partial-pairing models have no tie-adjustment, so tied teams
+    get different mu changes based on their starting position.
+    """
+    model_instance = model()
+
+    strong = model_instance.rating(mu=35)
+    weak = model_instance.rating(mu=15)
+    loser = model_instance.rating(mu=25)
+
+    new_teams = model_instance.rate(
+        [[strong], [weak], [loser]], ranks=[1, 1, 2]
+    )
+
+    # Weak player should gain more than strong player (more room to grow)
+    change_strong = new_teams[0][0].mu - 35
+    change_weak = new_teams[1][0].mu - 15
+    assert change_weak > change_strong
+
+    assert new_teams[2][0].mu < 25
