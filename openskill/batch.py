@@ -1,19 +1,15 @@
-"""Batch processing for openskill rating models.
+"""Batch Processing
 
-Enables parallel processing of thousands of games with automatic
-wave-based partitioning for entity safety and reproducible ordering.
+Parallel processing of games with automatic wave-based partitioning
+for entity safety and reproducible ordering.
 
-Architecture:
-    Games are partitioned into "waves" where no entity (player) appears
-    in more than one game within the same wave. This guarantees:
+Games are partitioned into "waves" where no entity (player) appears
+in more than one game within the same wave. This guarantees:
 
-    1. **Safety**: No concurrent writes to the same entity's ratings.
-    2. **Ordering**: If game *i* precedes game *j* and they share an
-       entity, *i*'s wave is strictly earlier than *j*'s wave.
-    3. **Parallelism**: All games within a wave can run simultaneously.
-
-    A background thread builds waves ahead of time (producer) while
-    worker processes/threads consume and process them.
+1. **Safety**: No concurrent writes to the same entity's ratings.
+2. **Ordering**: If game *i* precedes game *j* and they share an
+   entity, *i*'s wave is strictly earlier than *j*'s wave.
+3. **Parallelism**: All games within a wave can run simultaneously.
 
 Threading Model:
     - Free-threaded Python (3.13t/3.14t): Uses ``ThreadPoolExecutor``
@@ -51,7 +47,7 @@ from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = [
+__all__: list[str] = [
     "Game",
     "BatchProcessor",
     "_FastRating",
@@ -60,35 +56,24 @@ __all__ = [
     "MAX_ENTITIES",
 ]
 
-# ---------------------------------------------------------------------------
-# Capacity constants
-# ---------------------------------------------------------------------------
-# These caps keep per-game working sets small enough for CPU-cache-friendly
-# processing and bound the flat rating arrays to predictable sizes.
-# They also serve as documentation of the design envelope.
-
 MAX_TEAM_SIZE: int = 32
 """Maximum players per team.  Keeps per-game data on the stack in a future
-C/Cython hot-loop (32 players × 2 floats × 8 bytes = 512 B, fits in L1)."""
+C/Cython hot-loop (32 players x 2 floats x 8 bytes = 512 B, fits in L1)."""
 
 MAX_ENTITIES: int = 16_000
 """Maximum tracked entities.  The two flat arrays (mu, sigma) at this size
-consume 16 000 × 2 × 8 = 256 KB — comfortably within L2 cache."""
-
-
-# ---------------------------------------------------------------------------
-# _FastRating — minimal duck-type for _compute()
-# ---------------------------------------------------------------------------
+consume 16 000 x 2 x 8 = 256 KB, comfortably within L2 cache."""
 
 
 class _FastRating:
-    """Disposable Rating substitute for ``_compute()``.
+    """
+    Disposable Rating substitute for :code:`_compute()`.
 
-    ``model.rating()`` generates a UUID via ``/dev/urandom`` and
-    allocates a ``__dict__`` on every call.  ``_FastRating`` avoids
+    :code:`model.rating()` generates a UUID via ``/dev/urandom`` and
+    allocates a ``__dict__`` on every call.  :code:`_FastRating` avoids
     both: ``__slots__`` eliminates the dict, and there is no UUID.
 
-    ``_compute()`` only reads/writes ``.mu``, ``.sigma``, and calls
+    :code:`_compute()` only reads/writes ``.mu``, ``.sigma``, and calls
     ``.ordinal()``.  This class satisfies that contract at minimal cost.
     """
 
@@ -104,7 +89,8 @@ class _FastRating:
         alpha: float = 1,
         target: float = 0,
     ) -> float:
-        """Conservative skill estimate.
+        """
+        A single scalar value that represents the player's skill.
 
         :param z: Number of standard deviations below the mean.
         :param alpha: Scaling factor.
@@ -114,13 +100,13 @@ class _FastRating:
         return alpha * ((self.mu - z * self.sigma) + (target / alpha))
 
 
-# ---------------------------------------------------------------------------
-# Runtime detection
-# ---------------------------------------------------------------------------
-
-
 def _is_free_threaded() -> bool:
-    """Check if running on free-threaded Python with GIL disabled."""
+    """
+    Check if running on free-threaded Python with GIL disabled.
+
+    :return: ``True`` if the current runtime is free-threaded with the
+             GIL disabled.
+    """
     raw = sysconfig.get_config_var("Py_GIL_DISABLED")
     build_supports = raw is not None and int(raw) == 1
     gil_disabled = hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
@@ -132,11 +118,6 @@ _FREE_THREADED: bool = _is_free_threaded()
 # Global model reference for worker processes (set by _init_worker).
 _worker_model: Any = None
 _worker_tau_sq: float = 0.0
-
-
-# ---------------------------------------------------------------------------
-# Game descriptor
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -158,11 +139,6 @@ class Game:
     weights: list[list[float]] | None = None
 
 
-# ---------------------------------------------------------------------------
-# Wave partitioning
-# ---------------------------------------------------------------------------
-
-
 def partition_waves(games: list[Game]) -> list[list[tuple[int, Game]]]:
     """
     Partition games into conflict-free waves that respect chronological
@@ -170,8 +146,8 @@ def partition_waves(games: list[Game]) -> list[list[tuple[int, Game]]]:
 
     Two invariants are maintained:
 
-    1. **Safety** — no entity appears in two games within the same wave.
-    2. **Ordering** — if game *i* comes before game *j* in the input and
+    1. **Safety** -- no entity appears in two games within the same wave.
+    2. **Ordering** -- if game *i* comes before game *j* in the input and
        they share at least one entity, then *i*'s wave is strictly
        earlier than *j*'s wave.
 
@@ -184,8 +160,6 @@ def partition_waves(games: list[Game]) -> list[list[tuple[int, Game]]]:
     """
     waves: list[list[tuple[int, Game]]] = []
     wave_entities: list[set[str]] = []
-    # Track the latest wave each entity was placed in so we never
-    # put a game *before* an earlier game that shares an entity.
     entity_latest_wave: dict[str, int] = {}
 
     for idx, game in enumerate(games):
@@ -203,7 +177,7 @@ def partition_waves(games: list[Game]) -> list[list[tuple[int, Game]]]:
         # Find first wave >= min_wave with no entity overlap.
         placed = False
         for w_idx in range(min_wave, len(waves)):
-            if game_ents.isdisjoint(wave_entities[w_idx]):
+            if game_ents.isdisjoint(wave_entities[w_idx]):  # pragma: no branch
                 waves[w_idx].append((idx, game))
                 wave_entities[w_idx].update(game_ents)
                 for ent in game_ents:
@@ -221,17 +195,15 @@ def partition_waves(games: list[Game]) -> list[list[tuple[int, Game]]]:
     return waves
 
 
-# ---------------------------------------------------------------------------
-# Model serialisation helpers (for multiprocessing)
-# ---------------------------------------------------------------------------
-
-
 def _extract_model_config(model: Any) -> tuple[str, str, dict[str, Any]]:
     """
     Extract picklable model constructor arguments.
 
     Custom gamma functions must be picklable (module-level functions
     work; lambdas will raise ``PickleError`` at submission time).
+
+    :param model: An openskill model instance.
+    :return: A tuple of ``(module_name, class_name, kwargs)``.
     """
     model_class = type(model)
     module: str = model_class.__module__
@@ -261,7 +233,13 @@ def _extract_model_config(model: Any) -> tuple[str, str, dict[str, Any]]:
 def _init_worker(
     module_name: str, class_name: str, model_kwargs: dict[str, Any]
 ) -> None:
-    """Initialize model in worker process (called once per process)."""
+    """
+    Initialize model in worker process (called once per process).
+
+    :param module_name: Fully qualified module name.
+    :param class_name: Model class name within the module.
+    :param model_kwargs: Constructor keyword arguments.
+    """
     global _worker_model, _worker_tau_sq
     mod = importlib.import_module(module_name)
     model_class = getattr(mod, class_name)
@@ -280,11 +258,13 @@ def _worker_rate_game(
     ],
 ) -> list[tuple[int, float, float]]:
     """
-    Rate a single game in a worker process — fast path.
+    Rate a single game in a worker process (fast path).
 
-    Bypasses ``model.rate()`` to avoid deepcopy and validation.
-    Applies tau correction inline and calls ``_compute`` directly.
+    Bypasses :code:`model.rate()` to avoid deepcopy and validation.
+    Applies tau correction inline and calls :code:`_compute` directly.
 
+    :param args: Tuple of ``(team_indices, team_mus, team_sigmas,
+                 ranks, scores, weights)``.
     :return: List of ``(entity_array_index, new_mu, new_sigma)``.
     """
     team_indices, team_mus, team_sigmas, ranks, scores, weights = args
@@ -300,7 +280,7 @@ def _worker_rate_game(
         ]
         teams.append(team)
 
-    # Convert scores → ranks (matches rate() logic exactly).
+    # Convert scores to ranks (matches rate() logic exactly).
     ranks_list: list[float] | None = list(ranks) if ranks is not None else None
     scores_list: list[float] | None = list(scores) if scores is not None else None
     if not ranks_list and scores_list:
@@ -313,7 +293,7 @@ def _worker_rate_game(
 
     # Sort teams by rank before _compute (PlackettLuce requires this).
     if ranks_list is not None:
-        _rl = ranks_list  # local binding for lambda closure
+        _rl = ranks_list
         order: list[int] = sorted(range(len(_rl)), key=lambda i: _rl[i])
         teams = [teams[i] for i in order]
         team_indices = [team_indices[i] for i in order]
@@ -341,11 +321,6 @@ def _worker_rate_game(
             updates.append((eidx, player.mu, new_sigma))
 
     return updates
-
-
-# ---------------------------------------------------------------------------
-# BatchProcessor
-# ---------------------------------------------------------------------------
 
 
 class BatchProcessor:
@@ -425,10 +400,6 @@ class BatchProcessor:
         idx_to_eid: dict[int, str] = {v: k for k, v in entity_to_idx.items()}
         return {idx_to_eid[i]: (mus[i], sigmas[i]) for i in range(n)}
 
-    # ------------------------------------------------------------------
-    # Processing strategies
-    # ------------------------------------------------------------------
-
     def _process_sequential(
         self,
         games: list[Game],
@@ -436,7 +407,14 @@ class BatchProcessor:
         mus: list[float],
         sigmas: list[float],
     ) -> None:
-        """Process all games sequentially (single worker)."""
+        """
+        Process all games sequentially (single worker).
+
+        :param games: Games in processing order.
+        :param entity_to_idx: Mapping of entity IDs to array indices.
+        :param mus: Flat mu array (mutated in-place).
+        :param sigmas: Flat sigma array (mutated in-place).
+        """
         for game in games:
             self._rate_game_fast(game, entity_to_idx, mus, sigmas)
 
@@ -450,8 +428,13 @@ class BatchProcessor:
         """
         Producer-consumer pipeline.
 
-        A background thread builds waves (fast — set operations only)
+        A background thread builds waves (fast, set operations only)
         while workers process each wave as it arrives.
+
+        :param games: Games in processing order.
+        :param entity_to_idx: Mapping of entity IDs to array indices.
+        :param mus: Flat mu array (mutated in-place).
+        :param sigmas: Flat sigma array (mutated in-place).
         """
         wave_q: queue.Queue[list[tuple[int, Game]] | None] = queue.Queue(
             maxsize=self.n_workers * 2
@@ -499,7 +482,14 @@ class BatchProcessor:
         mus: list[float],
         sigmas: list[float],
     ) -> None:
-        """Process pre-built waves (non-pipelined)."""
+        """
+        Process pre-built waves (non-pipelined).
+
+        :param waves: Pre-partitioned waves.
+        :param entity_to_idx: Mapping of entity IDs to array indices.
+        :param mus: Flat mu array (mutated in-place).
+        :param sigmas: Flat sigma array (mutated in-place).
+        """
         if self._use_threads:
             with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
                 for wave in waves:
@@ -518,10 +508,6 @@ class BatchProcessor:
                         wave, entity_to_idx, mus, sigmas, proc_executor
                     )
 
-    # ------------------------------------------------------------------
-    # Wave execution
-    # ------------------------------------------------------------------
-
     def _execute_wave_threaded(
         self,
         wave: list[tuple[int, Game]],
@@ -530,7 +516,15 @@ class BatchProcessor:
         sigmas: list[float],
         executor: ThreadPoolExecutor,
     ) -> None:
-        """Process a wave with ThreadPoolExecutor (free-threaded Python)."""
+        """
+        Process a wave with :code:`ThreadPoolExecutor` (free-threaded Python).
+
+        :param wave: List of ``(index, game)`` tuples.
+        :param entity_to_idx: Mapping of entity IDs to array indices.
+        :param mus: Flat mu array (mutated in-place).
+        :param sigmas: Flat sigma array (mutated in-place).
+        :param executor: The thread pool executor.
+        """
         if len(wave) <= 2:
             for _, game in wave:
                 self._rate_game_fast(game, entity_to_idx, mus, sigmas)
@@ -551,7 +545,15 @@ class BatchProcessor:
         sigmas: list[float],
         executor: ProcessPoolExecutor,
     ) -> None:
-        """Process a wave with ProcessPoolExecutor (GIL Python)."""
+        """
+        Process a wave with :code:`ProcessPoolExecutor` (GIL Python).
+
+        :param wave: List of ``(index, game)`` tuples.
+        :param entity_to_idx: Mapping of entity IDs to array indices.
+        :param mus: Flat mu array (mutated in-place).
+        :param sigmas: Flat sigma array (mutated in-place).
+        :param executor: The process pool executor.
+        """
         if len(wave) <= 2:
             for _, game in wave:
                 self._rate_game_fast(game, entity_to_idx, mus, sigmas)
@@ -595,10 +597,6 @@ class BatchProcessor:
                 mus[idx] = new_mu
                 sigmas[idx] = new_sigma
 
-    # ------------------------------------------------------------------
-    # Per-game rating (fast path — no deepcopy)
-    # ------------------------------------------------------------------
-
     def _rate_game_fast(
         self,
         game: Game,
@@ -607,13 +605,16 @@ class BatchProcessor:
         sigmas: list[float],
     ) -> None:
         """
-        Rate a single game — fast path.
+        Rate a single game (fast path).
 
-        Bypasses ``model.rate()`` to avoid:
-        - ``copy.deepcopy`` (~58 % of rate() time)
-        - Input validation (we control the inputs)
+        Bypasses :code:`model.rate()` to avoid :code:`copy.deepcopy` and
+        input validation. Applies tau correction inline and calls
+        :code:`_compute` directly.
 
-        Applies tau correction inline and calls ``_compute`` directly.
+        :param game: The game to rate.
+        :param entity_to_idx: Mapping of entity IDs to array indices.
+        :param mus: Flat mu array (mutated in-place).
+        :param sigmas: Flat sigma array (mutated in-place).
         """
         model: Any = self.model
         tau_sq: float = self._tau_sq
@@ -639,17 +640,14 @@ class BatchProcessor:
             [list(w) for w in game.weights] if game.weights is not None else None
         )
 
-        # Convert scores → ranks (matches rate() logic exactly).
-        # _calculate_rankings returns a flat list of 0-based ordinals.
+        # Convert scores to ranks (matches rate() logic exactly).
         if not ranks and scores:
             ranks = list(map(lambda s: -s, scores))
             ranks = model._calculate_rankings(teams, ranks)
 
         # Sort teams by rank before calling _compute.
-        # PlackettLuce (and potentially future models) requires teams
-        # in rank order for its sequential-elimination formula.
         if ranks is not None:
-            _ranks = ranks  # local binding for lambda closure
+            _ranks = ranks
             order: list[int] = sorted(range(len(_ranks)), key=lambda i: _ranks[i])
             teams = [teams[i] for i in order]
             team_indices = [team_indices[i] for i in order]
@@ -666,8 +664,7 @@ class BatchProcessor:
             weights=weights,
         )
 
-        # Write back to flat arrays (team_indices already sorted to
-        # match the order passed to _compute).
+        # Write back to flat arrays.
         for team_idx, team_result in enumerate(result):
             for player_idx, player in enumerate(team_result):
                 idx = team_indices[team_idx][player_idx]

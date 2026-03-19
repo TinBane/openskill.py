@@ -1,23 +1,12 @@
-"""In-place rating registry backed by contiguous arrays.
+"""Ladder Rating Registry
+
+In-place rating registry backed by contiguous arrays.
 
 A :class:`Ladder` stores all entity ratings in pre-allocated
 :class:`array.array` buffers (contiguous C doubles) and exposes
 lightweight :class:`RatingView` flyweight objects that reference
-the backing store directly.  Games are rated in-place — no copies,
+the backing store directly.  Games are rated in-place -- no copies,
 no dict write-back, no per-call allocation.
-
-Architecture::
-
-    ┌────────────────────────────────────────────────────────┐
-    │ Ladder                                                 │
-    │  _mus   = array('d', [25.0, 25.0, 30.0, ...])  256 KB │
-    │  _sigmas= array('d', [ 8.3,  8.3,  5.0, ...])  256 KB │
-    │  _entity_to_idx = {"alice": 0, "bob": 1, ...}         │
-    │  _views = {"alice": RatingView(0), ...}                │
-    └────────────────────────────────────────────────────────┘
-              │                                │
-              ▼                                ▼
-    ladder["alice"].mu  ─►  _mus[0]    ladder["alice"].sigma ─► _sigmas[0]
 
 Usage::
 
@@ -31,7 +20,7 @@ Usage::
     lad["alice"]
     lad.add("bob", mu=30.0, sigma=5.0)
 
-    # Rate — mutates in-place, zero copies
+    # Rate -- mutates in-place, zero copies
     lad.rate([["alice"], ["bob"]], ranks=[1, 2])
     print(lad["alice"].mu)   # updated
 
@@ -48,7 +37,7 @@ from typing import Any
 
 from openskill.batch import MAX_ENTITIES, Game, _FastRating, partition_waves
 
-__all__ = ["Ladder", "RatingView"]
+__all__: list[str] = ["Ladder", "RatingView"]
 
 # Try to import the optional Cython fast path.
 try:
@@ -62,17 +51,13 @@ except ImportError:
     _HAS_CYTHON = False
 
 
-# ---------------------------------------------------------------------------
-# RatingView — flyweight into backing arrays
-# ---------------------------------------------------------------------------
-
-
 class RatingView:
-    """Lightweight view into a Ladder's backing arrays.
+    """
+    Lightweight view into a :class:`Ladder`'s backing arrays.
 
     Two pointers + one int = 24 bytes.  Attribute access goes
     straight to the contiguous ``array.array('d')`` buffers
-    via property descriptors — no per-access allocation.
+    via property descriptors -- no per-access allocation.
     """
 
     __slots__ = ("_mus", "_sigmas", "_idx", "_id")
@@ -89,11 +74,11 @@ class RatingView:
         self._idx = idx
         self._id = entity_id
 
-    # --- Properties that read/write the backing arrays directly ---
-
     @property
     def mu(self) -> float:
-        """Mean skill estimate, read directly from the backing array."""
+        """
+        Mean skill estimate, read directly from the backing array.
+        """
         result: float = self._mus[self._idx]
         return result
 
@@ -103,7 +88,9 @@ class RatingView:
 
     @property
     def sigma(self) -> float:
-        """Uncertainty (standard deviation), read directly from the backing array."""
+        """
+        Uncertainty (standard deviation), read directly from the backing array.
+        """
         result: float = self._sigmas[self._idx]
         return result
 
@@ -113,13 +100,20 @@ class RatingView:
 
     @property
     def entity_id(self) -> str:
-        """The unique entity identifier string."""
+        """
+        The unique entity identifier string.
+        """
         return self._id
 
     def ordinal(self, z: float = 3.0) -> float:
-        """Conservative skill estimate (mu - z * sigma).
+        r"""
+        A single scalar value that represents the player's skill where their
+        true skill is 99.7% likely to be higher.
 
         :param z: Number of standard deviations below the mean.
+
+                  *Represented by:* :math:`\mu - z \cdot \sigma`
+
         :return: The ordinal skill estimate.
         """
         mu: float = self._mus[self._idx]
@@ -132,19 +126,16 @@ class RatingView:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RatingView):
             return NotImplemented
+
         return self.mu == other.mu and self.sigma == other.sigma
 
     def __lt__(self, other: RatingView) -> bool:
         return self.ordinal() < other.ordinal()
 
 
-# ---------------------------------------------------------------------------
-# Ladder — the main registry
-# ---------------------------------------------------------------------------
-
-
 class Ladder:
-    """In-place rating registry backed by contiguous ``array.array('d')``.
+    """
+    In-place rating registry backed by contiguous ``array.array('d')``.
 
     :param model: An openskill model instance (e.g. ``PlackettLuce()``).
     :param max_entities: Pre-allocated capacity.  Two arrays of this
@@ -176,7 +167,6 @@ class Ladder:
     ) -> None:
         self._model: Any = model
         self._max: int = max_entities
-        # Pre-allocated contiguous C-double arrays.
         self._mus: array.array[float] = array.array("d", bytes(8 * max_entities))
         self._sigmas: array.array[float] = array.array("d", bytes(8 * max_entities))
         self._entity_to_idx: dict[str, int] = {}
@@ -184,15 +174,11 @@ class Ladder:
         self._size: int = 0
         self._tau_sq: float = model.tau**2
         self._limit_sigma: bool = model.limit_sigma
-        self._default_mu: float = model.mu
-        self._default_sigma: float = model.sigma
+        self._default_mu: float = float(model.mu)
+        self._default_sigma: float = float(model.sigma)
         self._use_cython: bool = (
             _HAS_CYTHON if use_cython is None else (use_cython and _HAS_CYTHON)
         )
-
-    # ------------------------------------------------------------------
-    # Dict-like access
-    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
         return self._size
@@ -209,11 +195,12 @@ class Ladder:
         return iter(self._entity_to_idx)
 
     def keys(self) -> KeysView[str]:
-        return self._entity_to_idx.keys()
+        """
+        Return a view of all registered entity IDs.
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
+        :return: A :class:`KeysView` of entity ID strings.
+        """
+        return self._entity_to_idx.keys()
 
     def _register(
         self,
@@ -221,6 +208,14 @@ class Ladder:
         mu: float | None = None,
         sigma: float | None = None,
     ) -> RatingView:
+        """
+        Register a new entity in the backing arrays.
+
+        :param entity_id: Unique identifier string.
+        :param mu: Initial mu (default: model default).
+        :param sigma: Initial sigma (default: model default).
+        :return: The :class:`RatingView` for this entity.
+        """
         idx = self._size
         if idx >= self._max:
             raise OverflowError(
@@ -240,7 +235,8 @@ class Ladder:
         mu: float | None = None,
         sigma: float | None = None,
     ) -> RatingView:
-        """Register an entity (or update its ratings if it already exists).
+        """
+        Register an entity (or update its ratings if it already exists).
 
         :param entity_id: Unique identifier string.
         :param mu: Initial mu (default: model default).
@@ -256,10 +252,6 @@ class Ladder:
             return self._views[entity_id]
         return self._register(entity_id, mu, sigma)
 
-    # ------------------------------------------------------------------
-    # Single-game rating (the hot path)
-    # ------------------------------------------------------------------
-
     def rate(
         self,
         teams: list[list[str]],
@@ -267,10 +259,11 @@ class Ladder:
         scores: list[float] | None = None,
         weights: list[list[float]] | None = None,
     ) -> None:
-        """Rate a single game, updating ratings **in-place**.
+        """
+        Rate a single game, updating ratings **in-place**.
 
         No copies are made.  Temporary Rating objects are created
-        only for the ``_compute()`` call, then discarded.
+        only for the :code:`_compute()` call, then discarded.
 
         :param teams: List of teams, each a list of entity ID strings.
         :param ranks: Optional ranks (lower = better).
@@ -306,7 +299,14 @@ class Ladder:
         scores: list[float] | None,
         weights: list[list[float]] | None,
     ) -> None:
-        """Pure-Python hot path."""
+        """
+        Pure-Python hot path for rating a single game.
+
+        :param teams: List of teams, each a list of entity ID strings.
+        :param ranks: Optional ranks (lower = better).
+        :param scores: Optional scores (higher = better).
+        :param weights: Optional per-player weights.
+        """
         model = self._model
         tau_sq = self._tau_sq
         mus = self._mus
@@ -328,14 +328,14 @@ class Ladder:
             team_objs.append(team)
             team_indices.append(indices)
 
-        # Score → rank conversion (matches rate() logic).
+        # Score to rank conversion (matches rate() logic).
         if not ranks and scores:
             ranks = list(map(lambda sc: -sc, scores))
             ranks = model._calculate_rankings(team_objs, ranks)
 
         # Sort by rank (PlackettLuce requires rank-ordered input).
         if ranks is not None:
-            _ranks = ranks  # local binding for lambda closure
+            _ranks = ranks
             order: list[int] = sorted(range(len(_ranks)), key=lambda i: _ranks[i])
             team_objs = [team_objs[i] for i in order]
             team_indices = [team_indices[i] for i in order]
@@ -352,7 +352,7 @@ class Ladder:
             weights=weights,
         )
 
-        # Write back — direct array mutation, no dict write-back.
+        # Write back: direct array mutation, no dict write-back.
         for team_idx, team_result in enumerate(result):
             for player_idx, player in enumerate(team_result):
                 idx = team_indices[team_idx][player_idx]
@@ -362,15 +362,12 @@ class Ladder:
                 mus[idx] = player.mu
                 sigmas[idx] = new_sigma
 
-    # ------------------------------------------------------------------
-    # Batch processing
-    # ------------------------------------------------------------------
-
     def rate_batch(
         self,
         games: list[Game],
     ) -> None:
-        """Process many games with wave-based ordering.
+        """
+        Process many games with wave-based ordering.
 
         Games are partitioned into conflict-free waves that respect
         chronological ordering, then each wave is processed
@@ -397,12 +394,12 @@ class Ladder:
                     weights=game.weights,
                 )
 
-    # ------------------------------------------------------------------
-    # Export / introspection
-    # ------------------------------------------------------------------
-
     def to_dict(self) -> dict[str, tuple[float, float]]:
-        """Export all ratings as ``{entity_id: (mu, sigma)}``."""
+        """
+        Export all ratings as ``{entity_id: (mu, sigma)}``.
+
+        :return: Dictionary mapping entity IDs to ``(mu, sigma)`` tuples.
+        """
         return {
             eid: (self._mus[idx], self._sigmas[idx])
             for eid, idx in self._entity_to_idx.items()
@@ -410,5 +407,7 @@ class Ladder:
 
     @property
     def model(self) -> Any:
-        """The underlying openskill model instance."""
+        """
+        The underlying openskill model instance.
+        """
         return self._model
